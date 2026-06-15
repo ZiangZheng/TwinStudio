@@ -4,10 +4,16 @@ import { DEFAULT_ROBOT_XML_URL, DEFAULT_XML_URL, MUJOCO_SCENE_PATH } from './con
 export interface PhpFkWorld {
   model: any;
   data: any;
-  root: THREE.Group;
-  bodies: Record<number, THREE.Group>;
+  referenceData: any;
+  actual: VisualTree;
+  reference: VisualTree;
   headBodyId: number;
   pelvisBodyId: number;
+}
+
+export interface VisualTree {
+  root: THREE.Group;
+  bodies: Record<number, THREE.Group>;
 }
 
 const decoder = new TextDecoder('utf-8');
@@ -37,15 +43,21 @@ export async function setupPhpMujocoVFS(mujoco: any): Promise<void> {
 export function loadPhpFkWorld(mujoco: any): PhpFkWorld {
   const model = mujoco.MjModel.loadFromXML(MUJOCO_SCENE_PATH);
   const data = new mujoco.MjData(model);
+  const referenceData = new mujoco.MjData(model);
   mujoco.mj_forward(model, data);
+  mujoco.mj_forward(model, referenceData);
 
-  const { root, bodies } = createVisualTree(mujoco, model);
-  updateVisualTransforms(model, data, bodies);
+  const actual = createVisualTree(mujoco, model, { includeGround: true });
+  const reference = createVisualTree(mujoco, model, { ghost: true, includeGround: false });
+  reference.root.name = 'Reference Ghost';
+  reference.root.visible = false;
+  updateVisualTransforms(model, data, actual.bodies);
+  updateVisualTransforms(model, referenceData, reference.bodies);
 
   const pelvisBodyId = findBodyId(model, 'pelvis');
   const headBodyId = findBodyId(model, 'head_link', pelvisBodyId);
 
-  return { model, data, root, bodies, headBodyId, pelvisBodyId };
+  return { model, data, referenceData, actual, reference, headBodyId, pelvisBodyId };
 }
 
 export function updateVisualTransforms(model: any, data: any, bodies: Record<number, THREE.Group>): void {
@@ -69,10 +81,10 @@ export function getBodyWorldTransform(
   return { position, quaternion };
 }
 
-function createVisualTree(mujoco: any, model: any): { root: THREE.Group; bodies: Record<number, THREE.Group> } {
+function createVisualTree(mujoco: any, model: any, options: { ghost?: boolean; includeGround?: boolean }): VisualTree {
   const names = new Uint8Array(model.names);
   const root = new THREE.Group();
-  root.name = 'PHP FK Visual Root';
+  root.name = options.ghost ? 'Reference Visual' : 'PHP FK Visual Root';
   const bodies: Record<number, THREE.Group> = {};
   const geometryCache = new Map<number, THREE.BufferGeometry>();
 
@@ -83,13 +95,14 @@ function createVisualTree(mujoco: any, model: any): { root: THREE.Group; bodies:
     if (!bodies[bodyId]) bodies[bodyId] = makeBodyGroup(model, names, bodyId);
 
     const type = model.geom_type[g];
+    if (type === mujoco.mjtGeom.mjGEOM_PLANE.value && !options.includeGround) continue;
     const geometry = buildGeometryForGeom(mujoco, model, g, geometryCache);
-    const mesh = new THREE.Mesh(geometry, buildMaterial(model, g));
+    const mesh = new THREE.Mesh(geometry, buildMaterial(model, g, !!options.ghost));
     mesh.name = readName(names, model.name_geomadr[g]) || `geom_${g}`;
     mesh.userData.geomId = g;
     mesh.userData.bodyId = bodyId;
-    mesh.castShadow = type !== mujoco.mjtGeom.mjGEOM_PLANE.value;
-    mesh.receiveShadow = true;
+    mesh.castShadow = !options.ghost && type !== mujoco.mjtGeom.mjGEOM_PLANE.value;
+    mesh.receiveShadow = !options.ghost;
 
     if (type === mujoco.mjtGeom.mjGEOM_PLANE.value) {
       mesh.rotation.x = -Math.PI / 2;
@@ -164,7 +177,17 @@ function buildMeshGeometry(model: any, meshId: number): THREE.BufferGeometry {
   return geometry;
 }
 
-function buildMaterial(model: any, geomId: number): THREE.Material {
+function buildMaterial(model: any, geomId: number, ghost: boolean): THREE.Material {
+  if (ghost) {
+    return new THREE.MeshBasicMaterial({
+      color: 0x4de8ff,
+      transparent: true,
+      opacity: 0.22,
+      depthWrite: false,
+      wireframe: true,
+    });
+  }
+
   const r = model.geom_rgba[geomId * 4 + 0];
   const g = model.geom_rgba[geomId * 4 + 1];
   const b = model.geom_rgba[geomId * 4 + 2];

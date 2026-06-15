@@ -7,6 +7,7 @@ export interface UIEvents {
   onReset: () => void;
   onSpeedChange: (speed: number) => void;
   onSeek: (time: number) => void;
+  onReferenceChange: (visible: boolean) => void;
   onFile: (file: File) => void;
 }
 
@@ -57,6 +58,10 @@ export function buildUI(events: UIEvents): UIHandle {
           <input data-time type="range" min="0" max="1" step="0.01" value="0">
           <strong data-time-value>0.00s</strong>
         </label>
+        <label class="control-line compact-line">
+          <span>Reference</span>
+          <input data-reference type="checkbox" checked>
+        </label>
       </section>
 
       <section class="panel upload-panel">
@@ -99,6 +104,7 @@ export function buildUI(events: UIEvents): UIHandle {
   const speedValue = must(root, '[data-speed-value]');
   const time = must<HTMLInputElement>(root, '[data-time]');
   const timeValue = must(root, '[data-time-value]');
+  const reference = must<HTMLInputElement>(root, '[data-reference]');
   const fileInput = must<HTMLInputElement>(root, '[data-file]');
   const upload = must<HTMLButtonElement>(root, '[data-upload]');
 
@@ -114,6 +120,7 @@ export function buildUI(events: UIEvents): UIHandle {
     events.onSpeedChange(value);
   };
   time.oninput = () => events.onSeek(Number(time.value));
+  reference.onchange = () => events.onReferenceChange(reference.checked);
   upload.onclick = () => fileInput.click();
   fileInput.onchange = () => {
     const file = fileInput.files?.[0];

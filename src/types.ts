@@ -8,12 +8,16 @@ export interface MotionClip {
   times: Float32Array;
   qpos: Float32Array[];
   qvel: Float32Array[];
+  referenceQpos?: Float32Array[];
+  referenceQvel?: Float32Array[];
   warnings: string[];
 }
 
 export interface MotionSample {
   qpos: Float32Array;
   qvel: Float32Array;
+  referenceQpos?: Float32Array;
+  referenceQvel?: Float32Array;
   idx: number;
   alpha: number;
 }

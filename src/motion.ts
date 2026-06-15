@@ -70,13 +70,15 @@ function loadMotionFromNPZ(bytes: Uint8Array, sourceName: string): MotionClip {
 
 function normalizeMotion(raw: RawMotion, sourceName: string, inheritedWarnings: string[] = []): MotionClip {
   const warnings = [...inheritedWarnings];
-  expandJointReference(raw, warnings);
+  const hasDynamicQpos = !!raw.qpos;
+  expandJointReference(raw, warnings, hasDynamicQpos);
   const qposRows = asMatrix(raw.qpos, 'qpos');
   const qvelRows = asMatrix(raw.qvel, 'qvel');
   if (qposRows.length === 0) throw new Error('Motion has no frames.');
   if (qvelRows.length !== qposRows.length) {
     throw new Error(`qvel frame count (${qvelRows.length}) does not match qpos (${qposRows.length}).`);
   }
+  const reference = buildReferenceTrack(raw, warnings, qposRows, qvelRows);
 
   const fps = readFps(raw) || 30;
   const times = raw.times ? new Float32Array(asVector(raw.times, 'times')) : makeTimes(qposRows.length, fps);
@@ -91,11 +93,48 @@ function normalizeMotion(raw: RawMotion, sourceName: string, inheritedWarnings: 
     times,
     qpos: qposRows.map((row) => new Float32Array(row)),
     qvel: qvelRows.map((row) => new Float32Array(row)),
+    referenceQpos: reference?.qpos.map((row) => new Float32Array(row)),
+    referenceQvel: reference?.qvel.map((row) => new Float32Array(row)),
     warnings,
   };
 }
 
-function expandJointReference(raw: RawMotion, warnings: string[]): void {
+function buildReferenceTrack(
+  raw: RawMotion,
+  warnings: string[],
+  dynamicQpos: number[][],
+  dynamicQvel: number[][],
+): { qpos: number[][]; qvel: number[][] } | null {
+  if (dynamicQpos.length > 0) {
+    warnings.push('Built reference track from dynamic qpos/qvel.');
+    return {
+      qpos: dynamicQpos.map((row) => [...row]),
+      qvel: dynamicQvel.map((row) => [...row]),
+    };
+  }
+
+  const jointPos = raw.joint_pos as number[][] | undefined;
+  if (!jointPos) return null;
+
+  const rows = reorderJointRows(raw, jointPos, warnings);
+  const rootPos = readRootRows(raw, 'root_pos', 'body_pos_w', 3);
+  const rootQuat = readRootRows(raw, 'root_quat', 'body_quat_w', 4);
+  const qpos = rows.map((row, frame) => [
+    ...(rootPos?.[frame] || INITIAL_STAND_QPOS.slice(0, 3)),
+    ...(rootQuat?.[frame] || INITIAL_STAND_QPOS.slice(3, 7)),
+    ...row,
+  ]);
+
+  const jointVel = raw.joint_vel as number[][] | undefined;
+  const qvel = jointVel
+    ? reorderJointRows(raw, jointVel, warnings).map((row) => [0, 0, 0, 0, 0, 0, ...row])
+    : estimateQvel(qpos, readFps(raw) || 30);
+
+  warnings.push('Built reference track from joint_pos/dof_pos.');
+  return { qpos, qvel };
+}
+
+function expandJointReference(raw: RawMotion, warnings: string[], hasDynamicQpos: boolean): void {
   if (!raw.root_pos && raw.body_pos_w) {
     raw.root_pos = asMatrix(raw.body_pos_w, 'body_pos_w').map((row) => row.slice(0, 3));
   }
@@ -107,7 +146,7 @@ function expandJointReference(raw: RawMotion, warnings: string[]): void {
     const jointPos = raw.joint_pos as number[][] | undefined;
     if (!jointPos) throw new Error('Motion needs qpos, joint_pos, or dof_pos.');
 
-    const rows = shouldTreatAsMujocoOrder(raw) ? jointPos : reorderIsaacLabRows(jointPos);
+    const rows = reorderJointRows(raw, jointPos, warnings);
     const rootPos = raw.root_pos as number[][] | undefined;
     const rootQuat = raw.root_quat as number[][] | undefined;
     raw.qpos = rows.map((row, frame) => [
@@ -115,18 +154,17 @@ function expandJointReference(raw: RawMotion, warnings: string[]): void {
       ...(rootQuat?.[frame] || INITIAL_STAND_QPOS.slice(3, 7)),
       ...row,
     ]);
-    warnings.push(
-      shouldTreatAsMujocoOrder(raw)
-        ? 'Built qpos from MuJoCo-order joint_pos/dof_pos.'
-        : 'Built qpos from Sonic IsaacLab-order joint_pos/dof_pos and reordered to MuJoCo.',
-    );
+    warnings.push('Built dynamic qpos from joint_pos/dof_pos.');
   }
 
   if (!raw.qvel) {
     const jointVel = raw.joint_vel as number[][] | undefined;
     const qpos = raw.qpos as number[][];
-    if (jointVel) {
-      const rows = shouldTreatAsMujocoOrder(raw) ? jointVel : reorderIsaacLabRows(jointVel);
+    if (hasDynamicQpos) {
+      raw.qvel = estimateQvel(qpos, readFps(raw) || 30);
+      warnings.push('Estimated dynamic qvel by finite differences.');
+    } else if (jointVel) {
+      const rows = reorderJointRows(raw, jointVel, warnings);
       raw.qvel = rows.map((row) => [0, 0, 0, 0, 0, 0, ...row]);
     } else {
       raw.qvel = estimateQvel(qpos, readFps(raw) || 30);
@@ -135,8 +173,25 @@ function expandJointReference(raw: RawMotion, warnings: string[]): void {
   }
 }
 
-function reorderIsaacLabRows(rows: number[][]): number[][] {
+function reorderJointRows(raw: RawMotion, rows: number[][], warnings: string[]): number[][] {
+  const names = raw.joint_names;
+  if (Array.isArray(names) && names.length === G1_MUJOCO_JOINT_NAMES.length) {
+    const nameToSource = new Map(names.map((name, index) => [String(name), index]));
+    const missing = G1_MUJOCO_JOINT_NAMES.filter((name) => !nameToSource.has(name));
+    if (missing.length === 0) {
+      return rows.map((row) => G1_MUJOCO_JOINT_NAMES.map((name) => row[nameToSource.get(name) ?? 0] ?? 0));
+    }
+    warnings.push(`joint_names missing ${missing.length} MuJoCo joints; falling back to Sonic IsaacLab order.`);
+  }
+  if (shouldTreatAsMujocoOrder(raw)) return rows;
+  warnings.push('Reordered joint rows from Sonic IsaacLab order to MuJoCo order.');
   return rows.map((row) => SONIC_ISAACLAB_TO_MUJOCO.map((sourceIndex) => row[sourceIndex] ?? 0));
+}
+
+function readRootRows(raw: RawMotion, primary: string, fallback: string, width: number): number[][] | null {
+  const value = raw[primary] ?? raw[fallback];
+  if (!value) return null;
+  return asMatrix(value, primary).map((row) => row.slice(0, width));
 }
 
 function shouldTreatAsMujocoOrder(raw: RawMotion): boolean {
@@ -171,13 +226,17 @@ export function sampleMotion(motion: MotionClip, time: number): MotionSample {
   const alpha = t1 > t0 ? (time - t0) / (t1 - t0) : 0;
   const qpos = lerpQpos(motion.qpos[idx], motion.qpos[idx + 1], alpha);
   const qvel = lerpArray(motion.qvel[idx], motion.qvel[idx + 1], alpha);
-  return { qpos, qvel, idx, alpha };
+  const referenceQpos = motion.referenceQpos ? lerpQpos(motion.referenceQpos[idx], motion.referenceQpos[idx + 1], alpha) : undefined;
+  const referenceQvel = motion.referenceQvel ? lerpArray(motion.referenceQvel[idx], motion.referenceQvel[idx + 1], alpha) : undefined;
+  return { qpos, qvel, referenceQpos, referenceQvel, idx, alpha };
 }
 
 function cloneSample(motion: MotionClip, idx: number, alpha: number): MotionSample {
   return {
     qpos: new Float32Array(motion.qpos[idx]),
     qvel: new Float32Array(motion.qvel[idx]),
+    referenceQpos: motion.referenceQpos?.[idx] ? new Float32Array(motion.referenceQpos[idx]) : undefined,
+    referenceQvel: motion.referenceQvel?.[idx] ? new Float32Array(motion.referenceQvel[idx]) : undefined,
     idx,
     alpha,
   };

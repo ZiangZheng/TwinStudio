@@ -6,7 +6,7 @@ import { DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
 import { loadMotionFromFile, loadMotionFromURL, sampleMotion } from './motion';
 import { getBodyWorldTransform, loadPhpFkWorld, setupPhpMujocoVFS, updateVisualTransforms, type PhpFkWorld } from './phpFkWorld';
 import { buildUI } from './ui';
-import { EMPTY_TELEMETRY } from './telemetry';
+import { computeTrackingRms, EMPTY_TELEMETRY } from './telemetry';
 import type { MotionClip, TelemetryFrame } from './types';
 
 export async function runApp(container: HTMLElement): Promise<void> {
@@ -20,6 +20,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
   let playing = true;
   let speed = 1;
   let currentTime = 0;
+  let showReference = true;
   let lastFrame = performance.now();
   let smoothedFps = 0;
   const stageOffset = new THREE.Vector3();
@@ -34,6 +35,10 @@ export async function runApp(container: HTMLElement): Promise<void> {
       speed = value;
     },
     onSeek: (value) => resetTo(value),
+    onReferenceChange: (visible) => {
+      showReference = visible;
+      updateReferenceVisibility();
+    },
     onFile: async (file) => {
       try {
         ui.setLoading(`Loading ${file.name}`);
@@ -58,7 +63,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
   const scene = createScene();
   const stageRoot = new THREE.Group();
   stageRoot.name = 'Centered FK Stage';
-  stageRoot.add(world.root);
+  stageRoot.add(world.actual.root);
+  stageRoot.add(world.reference.root);
   scene.add(stageRoot);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -96,6 +102,9 @@ export async function runApp(container: HTMLElement): Promise<void> {
     const firstQvel = nextMotion.qvel[0];
     if (firstQpos.length !== world.model.nq) warnings.push(`qpos has ${firstQpos.length} values, model expects ${world.model.nq}.`);
     if (firstQvel.length !== world.model.nv) warnings.push(`qvel has ${firstQvel.length} values, model expects ${world.model.nv}.`);
+    if (nextMotion.referenceQpos && nextMotion.referenceQpos[0]?.length !== world.model.nq) {
+      warnings.push(`reference qpos has ${nextMotion.referenceQpos[0].length} values, model expects ${world.model.nq}.`);
+    }
     motion = { ...nextMotion, warnings };
     ui.setMotionInfo(motion.sourceName, motion.qpos.length, motion.duration, motion.fps, warnings);
     resetTo(0);
@@ -106,8 +115,12 @@ export async function runApp(container: HTMLElement): Promise<void> {
     currentTime = wrapTime(time, motion.duration);
     const sample = sampleMotion(motion, currentTime);
     setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
+    setReferenceFromSample(sample);
     mujoco.mj_forward(world.model, world.data);
-    updateVisualTransforms(world.model, world.data, world.bodies);
+    mujoco.mj_forward(world.model, world.referenceData);
+    updateVisualTransforms(world.model, world.data, world.actual.bodies);
+    updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
+    updateReferenceVisibility();
     updateStageCenter();
     ui.setTime(currentTime, motion.duration);
     pushTelemetry();
@@ -124,7 +137,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
 
     if (motion && playing) stepFk(dt);
 
-    updateVisualTransforms(world.model, world.data, world.bodies);
+    updateVisualTransforms(world.model, world.data, world.actual.bodies);
+    updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
     updateStageCenter();
 
     const head = getBodyWorldTransform(world.data, world.headBodyId);
@@ -143,18 +157,21 @@ export async function runApp(container: HTMLElement): Promise<void> {
     currentTime = wrapTime(currentTime + dt * speed, motion.duration);
     const sample = sampleMotion(motion, currentTime);
     setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
+    setReferenceFromSample(sample);
     mujoco.mj_forward(world.model, world.data);
+    mujoco.mj_forward(world.model, world.referenceData);
     ui.setTime(currentTime, motion.duration);
     pushTelemetry();
   }
 
   function pushTelemetry(): void {
-    if (!world) return;
+    if (!world || !motion) return;
+    const sample = sampleMotion(motion, currentTime);
     const telemetry: TelemetryFrame = {
       time: currentTime,
       fps: smoothedFps,
-      trackingRms: 0,
-      rootHeightRef: world.data.qpos[2] ?? 0,
+      trackingRms: sample.referenceQpos ? computeTrackingRms(world.model, world.data.qpos, sample.referenceQpos) : 0,
+      rootHeightRef: sample.referenceQpos?.[2] ?? world.data.qpos[2] ?? 0,
       rootHeightActual: world.data.qpos[2] ?? 0,
       meanTorque: 0,
       maxTorque: 0,
@@ -169,6 +186,18 @@ export async function runApp(container: HTMLElement): Promise<void> {
     stageRoot.position.copy(stageOffset);
     cameraTarget.set(0, Math.max(0.72, Math.min(1.35, pelvis.y + 0.06)), 0);
     controls.target.lerp(cameraTarget, 0.12);
+  }
+
+  function setReferenceFromSample(sample: ReturnType<typeof sampleMotion>): void {
+    if (!world) return;
+    if (sample.referenceQpos) {
+      setStateFromQpos(world.model, world.referenceData, sample.referenceQpos, sample.referenceQvel);
+    }
+  }
+
+  function updateReferenceVisibility(): void {
+    if (!world || !motion) return;
+    world.reference.root.visible = showReference && !!motion.referenceQpos;
   }
 }
 

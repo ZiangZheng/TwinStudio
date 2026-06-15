@@ -235,6 +235,11 @@ p {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.compact-line {
+  grid-template-columns: 58px auto;
+  justify-content: start;
+}
+
 .control-line strong {
   color: var(--ink);
   text-align: right;
