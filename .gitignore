@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+public/assets/scenes/
+public/php-wasm/
 
 # Editor directories and files
 .vscode/*
