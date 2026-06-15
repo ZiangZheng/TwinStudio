@@ -1,0 +1,22 @@
+{
+  "name": "sonic-twin-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@mujoco/mujoco": "^3.9.0",
+    "@types/three": "^0.184.1",
+    "chart.js": "^4.5.1",
+    "fflate": "^0.8.2",
+    "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^8.0.12"
+  }
+}
