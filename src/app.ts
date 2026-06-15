@@ -31,6 +31,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
   let smoothedFps = 0;
   let latestControl: ControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
   let plotAccumulator = 0;
+  const stageOffset = new THREE.Vector3();
+  const cameraTarget = new THREE.Vector3(0, 0.85, 0);
 
   const ui = buildUI({
     onPlayPause: () => {
@@ -87,8 +89,11 @@ export async function runApp(container: HTMLElement): Promise<void> {
   setInitialStandState(world, mujoco);
 
   const scene = createScene();
-  scene.add(world.actual.root);
-  scene.add(world.reference.root);
+  const stageRoot = new THREE.Group();
+  stageRoot.name = 'Centered Robot Stage';
+  stageRoot.add(world.actual.root);
+  stageRoot.add(world.reference.root);
+  scene.add(stageRoot);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -97,12 +102,12 @@ export async function runApp(container: HTMLElement): Promise<void> {
   renderer.shadowMap.type = THREE.PCFShadowMap;
   viewport.appendChild(renderer.domElement);
 
-  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.02, 120);
-  camera.position.set(3.0, 1.7, 2.6);
+  const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.02, 120);
+  camera.position.set(2.35, 1.55, 2.35);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.06;
-  controls.target.set(0, 0.78, 0);
+  controls.target.copy(cameraTarget);
 
   const rgbWindow = new CameraWindow(ui.rgbContainer, false);
   const depthWindow = new CameraWindow(ui.depthContainer, true);
@@ -139,7 +144,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
     latestControl = { meanAbsTorque: 0, maxAbsTorque: 0 };
     const sample = sampleMotion(motion, currentTime);
     if (mode === 'sim2sim') {
-      setStateFromReference(world.model, world.data, new Float32Array(INITIAL_STAND_QPOS), new Float32Array(world.model.nv));
+      setStateFromReference(world.model, world.data, buildStandQposAtReferenceRoot(sample.qpos), new Float32Array(world.model.nv));
     } else {
       setStateFromReference(world.model, world.data, sample.qpos, sample.qvel);
     }
@@ -148,6 +153,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
     mujoco.mj_forward(world.model, world.referenceData);
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
+    updateStageCenter();
     world.reference.root.visible = mode === 'sim2sim' && showGhost;
     ui.setTime(currentTime, motion.duration);
   }
@@ -176,7 +182,9 @@ export async function runApp(container: HTMLElement): Promise<void> {
 
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
+    updateStageCenter();
     const head = getBodyWorldTransform(world.data, world.headBodyId);
+    head.position.add(stageOffset);
     rgbWindow.updatePose(head.position, head.quaternion);
     depthWindow.updatePose(head.position, head.quaternion);
 
@@ -208,6 +216,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
         mujoco.mj_forward(world.model, world.referenceData);
         latestControl = applyPDControl(mujoco, world.model, world.data, sample.qpos, sample.qvel, controller);
         mujoco.mj_step(world.model, world.data);
+        stabilizeFloatingBase(world.model, world.data, sample.qpos, sample.qvel);
+        mujoco.mj_forward(world.model, world.data);
         simTime += step;
         steps++;
       }
@@ -240,6 +250,26 @@ export async function runApp(container: HTMLElement): Promise<void> {
     heightPlot.push([telemetry.rootHeightRef, telemetry.rootHeightActual], label);
     effortPlot.push([telemetry.meanTorque, telemetry.maxTorque], label);
   }
+
+  function updateStageCenter(): void {
+    if (!world) return;
+    const pelvis = getBodyWorldTransform(world.data, world.pelvisBodyId).position;
+    stageOffset.set(-pelvis.x, 0, -pelvis.z);
+    stageRoot.position.copy(stageOffset);
+    cameraTarget.set(0, Math.max(0.72, Math.min(1.35, pelvis.y + 0.05)), 0);
+    controls.target.lerp(cameraTarget, 0.12);
+  }
+}
+
+function buildStandQposAtReferenceRoot(referenceQpos: Float32Array): Float32Array {
+  const qpos = new Float32Array(INITIAL_STAND_QPOS);
+  for (let i = 0; i < Math.min(7, referenceQpos.length); i++) qpos[i] = referenceQpos[i];
+  return qpos;
+}
+
+function stabilizeFloatingBase(model: any, data: any, qposRef: Float32Array, qvelRef: Float32Array): void {
+  for (let i = 0; i < Math.min(7, model.nq, qposRef.length); i++) data.qpos[i] = qposRef[i];
+  for (let i = 0; i < Math.min(6, model.nv, qvelRef.length); i++) data.qvel[i] = qvelRef[i];
 }
 
 function createScene(): THREE.Scene {

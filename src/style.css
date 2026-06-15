@@ -60,8 +60,8 @@ button:hover {
   position: fixed;
   inset: 0;
   display: grid;
-  grid-template-columns: 332px minmax(0, 1fr) 342px;
-  grid-template-rows: auto minmax(0, 1fr) 172px;
+  grid-template-columns: 300px minmax(0, 1fr) 320px;
+  grid-template-rows: auto minmax(0, 1fr) 148px;
   gap: 14px;
   padding: 16px;
   z-index: 5;
@@ -155,14 +155,14 @@ p {
   grid-column: 3;
   grid-row: 2;
   justify-self: end;
-  width: 342px;
+  width: 320px;
 }
 
 .panel,
 .plot-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: rgba(9, 14, 22, 0.66);
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(18px);
 }
@@ -357,7 +357,7 @@ input[type="checkbox"] {
 
 .plot-panel {
   min-width: 0;
-  height: 172px;
+  height: 148px;
   padding: 8px;
 }
 
