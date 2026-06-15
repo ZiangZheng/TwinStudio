@@ -138,7 +138,11 @@ export async function runApp(container: HTMLElement): Promise<void> {
     simTime = currentTime;
     latestControl = { meanAbsTorque: 0, maxAbsTorque: 0 };
     const sample = sampleMotion(motion, currentTime);
-    setStateFromReference(world.model, world.data, sample.qpos, sample.qvel);
+    if (mode === 'sim2sim') {
+      setStateFromReference(world.model, world.data, new Float32Array(INITIAL_STAND_QPOS), new Float32Array(world.model.nv));
+    } else {
+      setStateFromReference(world.model, world.data, sample.qpos, sample.qvel);
+    }
     setStateFromReference(world.model, world.referenceData, sample.qpos, sample.qvel);
     mujoco.mj_forward(world.model, world.data);
     mujoco.mj_forward(world.model, world.referenceData);
