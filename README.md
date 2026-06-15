@@ -4,7 +4,7 @@ Browser-native Sonic FK playback workspace powered by the `mujoco-js` WASM pipel
 
 ## Intent
 
-SonicTwin Studio loads a Unitree G1 MuJoCo model in the browser, plays Sonic dynamic motion by writing qpos/qvel directly into MuJoCo, and renders the result through the same style of Three.js visual tree used by the PHP MuJoCo WASM demo. The page is a pure FK viewer: no reference ghost, no PD tracker, and no sim2sim control loop.
+SonicTwin Studio loads a Unitree G1 MuJoCo model in the browser, plays Sonic dynamic motion by writing qpos/qvel directly into MuJoCo, and renders the result through the same style of Three.js visual tree used by the PHP MuJoCo WASM demo. The page supports FK playback plus an experimental PD-based sim2sim tracker with an optional reference ghost.
 
 ## Run
 

@@ -2,12 +2,13 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import loadMujoco from 'mujoco-js/dist/mujoco_wasm.js';
 import { CameraWindow } from './cameras';
-import { DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
+import { DEFAULT_CONTROLLER, DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
+import { applyPDControl } from './controller';
 import { loadMotionFromFile, loadMotionFromURL, sampleMotion } from './motion';
 import { getBodyWorldTransform, loadPhpFkWorld, setupPhpMujocoVFS, updateVisualTransforms, type PhpFkWorld } from './phpFkWorld';
 import { buildUI } from './ui';
 import { computeTrackingRms, EMPTY_TELEMETRY } from './telemetry';
-import type { MotionClip, TelemetryFrame } from './types';
+import type { ControlStats, ControllerOptions, MotionClip, PlaybackMode, TelemetryFrame } from './types';
 
 export async function runApp(container: HTMLElement): Promise<void> {
   container.innerHTML = '<div id="viewport"></div>';
@@ -18,11 +19,14 @@ export async function runApp(container: HTMLElement): Promise<void> {
   let mujoco: any = null;
   let motion: MotionClip | null = null;
   let playing = true;
+  let playbackMode: PlaybackMode = readInitialPlaybackMode();
   let speed = 1;
   let currentTime = 0;
-  let showReference = false;
+  let showReference = playbackMode === 'sim2sim';
   let lastFrame = performance.now();
   let smoothedFps = 0;
+  let controllerOptions: ControllerOptions = { ...DEFAULT_CONTROLLER };
+  let lastControlStats: ControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
   const stageOffset = new THREE.Vector3();
   const cameraTarget = new THREE.Vector3(0, 0.9, 0);
 
@@ -31,6 +35,12 @@ export async function runApp(container: HTMLElement): Promise<void> {
       playing = !playing;
     },
     onReset: () => resetTo(0),
+    onModeChange: (mode) => {
+      playbackMode = mode;
+      showReference = mode === 'sim2sim';
+      ui.setReferenceVisible(showReference);
+      resetTo(currentTime);
+    },
     onSpeedChange: (value) => {
       speed = value;
     },
@@ -38,6 +48,15 @@ export async function runApp(container: HTMLElement): Promise<void> {
     onReferenceChange: (visible) => {
       showReference = visible;
       updateReferenceVisibility();
+    },
+    onKpChange: (kp) => {
+      controllerOptions = { ...controllerOptions, kp };
+    },
+    onKdChange: (kd) => {
+      controllerOptions = { ...controllerOptions, kd };
+    },
+    onTorqueScaleChange: (torqueScale) => {
+      controllerOptions = { ...controllerOptions, torqueScale };
     },
     onFile: async (file) => {
       try {
@@ -49,6 +68,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
       }
     },
   });
+  ui.setMode(playbackMode);
+  ui.setReferenceVisible(showReference);
   container.appendChild(ui.root);
   ui.setTelemetry(EMPTY_TELEMETRY);
 
@@ -113,6 +134,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
   function resetTo(time: number): void {
     if (!world || !mujoco || !motion) return;
     currentTime = wrapTime(time, motion.duration);
+    lastControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
     const sample = sampleMotion(motion, currentTime);
     setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
     setReferenceFromSample(sample);
@@ -135,7 +157,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
     const instantFps = dt > 0 ? 1 / dt : 0;
     smoothedFps = smoothedFps === 0 ? instantFps : smoothedFps * 0.92 + instantFps * 0.08;
 
-    if (motion && playing) stepFk(dt);
+    if (motion && playing) stepPlayback(dt);
 
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
@@ -152,13 +174,46 @@ export async function runApp(container: HTMLElement): Promise<void> {
     depthWindow.render(scene);
   }
 
-  function stepFk(dt: number): void {
+  function stepPlayback(dt: number): void {
+    if (playbackMode === 'sim2sim') stepSim2Sim(dt);
+    else stepKinematic(dt);
+  }
+
+  function stepKinematic(dt: number): void {
     if (!world || !mujoco || !motion) return;
     currentTime = wrapTime(currentTime + dt * speed, motion.duration);
     const sample = sampleMotion(motion, currentTime);
     setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
     setReferenceFromSample(sample);
     mujoco.mj_forward(world.model, world.data);
+    mujoco.mj_forward(world.model, world.referenceData);
+    ui.setTime(currentTime, motion.duration);
+    pushTelemetry();
+  }
+
+  function stepSim2Sim(dt: number): void {
+    if (!world || !mujoco || !motion) return;
+    const step = world.model.opt.timestep || 1 / 500;
+    const targetTime = currentTime + dt * speed;
+    let steps = 0;
+    let stats: ControlStats = lastControlStats;
+
+    while (currentTime < targetTime && steps < 80) {
+      if (currentTime >= motion.duration) {
+        resetTo(0);
+        return;
+      }
+      const sample = sampleMotion(motion, currentTime);
+      stats = applyPDControl(mujoco, world.model, world.data, sample.qpos, sample.qvel, controllerOptions);
+      mujoco.mj_step(world.model, world.data);
+      currentTime += step;
+      steps++;
+    }
+
+    currentTime = wrapTime(currentTime, motion.duration);
+    lastControlStats = stats;
+    const sample = sampleMotion(motion, currentTime);
+    setReferenceFromSample(sample);
     mujoco.mj_forward(world.model, world.referenceData);
     ui.setTime(currentTime, motion.duration);
     pushTelemetry();
@@ -173,8 +228,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
       trackingRms: sample.referenceQpos ? computeTrackingRms(world.model, world.data.qpos, sample.referenceQpos) : 0,
       rootHeightRef: sample.referenceQpos?.[2] ?? world.data.qpos[2] ?? 0,
       rootHeightActual: world.data.qpos[2] ?? 0,
-      meanTorque: 0,
-      maxTorque: 0,
+      meanTorque: playbackMode === 'sim2sim' ? lastControlStats.meanAbsTorque : 0,
+      maxTorque: playbackMode === 'sim2sim' ? lastControlStats.maxAbsTorque : 0,
     };
     ui.setTelemetry(telemetry);
   }
@@ -252,4 +307,9 @@ function makeSkyTexture(): THREE.CanvasTexture {
 function wrapTime(time: number, duration: number): number {
   if (duration <= 0) return 0;
   return ((time % duration) + duration) % duration;
+}
+
+function readInitialPlaybackMode(): PlaybackMode {
+  const mode = new URLSearchParams(window.location.search).get('mode');
+  return mode === 'sim2sim' ? 'sim2sim' : 'kinematic';
 }

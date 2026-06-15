@@ -1,13 +1,17 @@
 import { APP_NAME } from './constants';
 import { formatMetric } from './telemetry';
-import type { TelemetryFrame } from './types';
+import type { PlaybackMode, TelemetryFrame } from './types';
 
 export interface UIEvents {
   onPlayPause: () => void;
   onReset: () => void;
+  onModeChange: (mode: PlaybackMode) => void;
   onSpeedChange: (speed: number) => void;
   onSeek: (time: number) => void;
   onReferenceChange: (visible: boolean) => void;
+  onKpChange: (kp: number) => void;
+  onKdChange: (kd: number) => void;
+  onTorqueScaleChange: (scale: number) => void;
   onFile: (file: File) => void;
 }
 
@@ -21,6 +25,8 @@ export interface UIHandle {
   setMotionInfo(name: string, frames: number, duration: number, fps: number, warnings: string[]): void;
   setTime(time: number, duration: number): void;
   setPlaying(playing: boolean): void;
+  setMode(mode: PlaybackMode): void;
+  setReferenceVisible(visible: boolean): void;
   setTelemetry(frame: TelemetryFrame): void;
 }
 
@@ -48,6 +54,10 @@ export function buildUI(events: UIEvents): UIHandle {
           <button class="primary-action" data-play>Pause</button>
           <button data-reset>Reset</button>
         </div>
+        <div class="segmented">
+          <button class="selected" data-mode-fk>FK</button>
+          <button data-mode-sim>Sim2Sim</button>
+        </div>
         <label class="control-line">
           <span>Speed</span>
           <input data-speed type="range" min="0.1" max="2.5" step="0.1" value="1">
@@ -61,6 +71,21 @@ export function buildUI(events: UIEvents): UIHandle {
         <label class="control-line compact-line">
           <span>Reference</span>
           <input data-reference type="checkbox">
+        </label>
+        <label class="control-line">
+          <span>Kp</span>
+          <input data-kp type="range" min="0" max="300" step="5" value="150">
+          <strong data-kp-value>150</strong>
+        </label>
+        <label class="control-line">
+          <span>Kd</span>
+          <input data-kd type="range" min="0" max="30" step="1" value="8">
+          <strong data-kd-value>8</strong>
+        </label>
+        <label class="control-line">
+          <span>Torque</span>
+          <input data-torque type="range" min="0.1" max="2" step="0.1" value="1">
+          <strong data-torque-value>1.0x</strong>
         </label>
       </section>
 
@@ -83,7 +108,9 @@ export function buildUI(events: UIEvents): UIHandle {
           <div><span>FPS</span><strong data-fps>--</strong></div>
           <div><span>Time</span><strong data-runtime>--</strong></div>
           <div><span>root z</span><strong data-zsim>--</strong></div>
-          <div><span>FK err</span><strong data-rms>0.000</strong></div>
+          <div><span>track err</span><strong data-rms>0.000</strong></div>
+          <div><span>mean τ</span><strong data-mean-torque>--</strong></div>
+          <div><span>max τ</span><strong data-max-torque>--</strong></div>
         </div>
       </section>
 
@@ -100,11 +127,19 @@ export function buildUI(events: UIEvents): UIHandle {
   const status = must(root, '[data-status]');
   const playButton = must<HTMLButtonElement>(root, '[data-play]');
   const resetButton = must<HTMLButtonElement>(root, '[data-reset]');
+  const fkButton = must<HTMLButtonElement>(root, '[data-mode-fk]');
+  const simButton = must<HTMLButtonElement>(root, '[data-mode-sim]');
   const speed = must<HTMLInputElement>(root, '[data-speed]');
   const speedValue = must(root, '[data-speed-value]');
   const time = must<HTMLInputElement>(root, '[data-time]');
   const timeValue = must(root, '[data-time-value]');
   const reference = must<HTMLInputElement>(root, '[data-reference]');
+  const kp = must<HTMLInputElement>(root, '[data-kp]');
+  const kpValue = must(root, '[data-kp-value]');
+  const kd = must<HTMLInputElement>(root, '[data-kd]');
+  const kdValue = must(root, '[data-kd-value]');
+  const torque = must<HTMLInputElement>(root, '[data-torque]');
+  const torqueValue = must(root, '[data-torque-value]');
   const fileInput = must<HTMLInputElement>(root, '[data-file]');
   const upload = must<HTMLButtonElement>(root, '[data-upload]');
 
@@ -114,6 +149,14 @@ export function buildUI(events: UIEvents): UIHandle {
     setPlaying(playing);
   };
   resetButton.onclick = events.onReset;
+  fkButton.onclick = () => {
+    setMode('kinematic');
+    events.onModeChange('kinematic');
+  };
+  simButton.onclick = () => {
+    setMode('sim2sim');
+    events.onModeChange('sim2sim');
+  };
   speed.oninput = () => {
     const value = Number(speed.value);
     speedValue.textContent = `${value.toFixed(1)}x`;
@@ -121,6 +164,21 @@ export function buildUI(events: UIEvents): UIHandle {
   };
   time.oninput = () => events.onSeek(Number(time.value));
   reference.onchange = () => events.onReferenceChange(reference.checked);
+  kp.oninput = () => {
+    const value = Number(kp.value);
+    kpValue.textContent = String(value);
+    events.onKpChange(value);
+  };
+  kd.oninput = () => {
+    const value = Number(kd.value);
+    kdValue.textContent = String(value);
+    events.onKdChange(value);
+  };
+  torque.oninput = () => {
+    const value = Number(torque.value);
+    torqueValue.textContent = `${value.toFixed(1)}x`;
+    events.onTorqueScaleChange(value);
+  };
   upload.onclick = () => fileInput.click();
   fileInput.onchange = () => {
     const file = fileInput.files?.[0];
@@ -132,6 +190,15 @@ export function buildUI(events: UIEvents): UIHandle {
     playing = value;
     playButton.textContent = value ? 'Pause' : 'Play';
     playButton.classList.toggle('is-paused', !value);
+  }
+
+  function setMode(mode: PlaybackMode) {
+    fkButton.classList.toggle('selected', mode === 'kinematic');
+    simButton.classList.toggle('selected', mode === 'sim2sim');
+  }
+
+  function setReferenceVisible(visible: boolean) {
+    reference.checked = visible;
   }
 
   return {
@@ -162,11 +229,15 @@ export function buildUI(events: UIEvents): UIHandle {
       timeValue.textContent = `${current.toFixed(2)}s`;
     },
     setPlaying,
+    setMode,
+    setReferenceVisible,
     setTelemetry(frame: TelemetryFrame) {
       must(root, '[data-fps]').textContent = formatMetric(frame.fps, 0);
       must(root, '[data-runtime]').textContent = `${frame.time.toFixed(2)}s`;
       must(root, '[data-zsim]').textContent = formatMetric(frame.rootHeightActual, 2);
       must(root, '[data-rms]').textContent = formatMetric(frame.trackingRms, 3);
+      must(root, '[data-mean-torque]').textContent = formatMetric(frame.meanTorque, 1);
+      must(root, '[data-max-torque]').textContent = formatMetric(frame.maxTorque, 1);
     },
   };
 }

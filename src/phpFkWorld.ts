@@ -33,8 +33,7 @@ export async function setupPhpMujocoVFS(mujoco: any): Promise<void> {
   const meshFiles = getMeshFiles(robotText);
   await Promise.all(
     meshFiles.map(async (file) => {
-      const response = await fetch(`./assets/g1/meshes/g1/${file}`);
-      if (!response.ok) throw new Error(`Failed to load mesh ${file}`);
+      const response = await fetchWithRetry(`./assets/g1/meshes/g1/${file}`);
       mujoco.FS.writeFile(`/workspace/meshes/g1/${file}`, new Uint8Array(await response.arrayBuffer()));
     }),
   );
@@ -253,9 +252,33 @@ function getMeshFiles(robotXml: string): string[] {
 }
 
 async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.statusText}`);
+  const response = await fetchWithRetry(url);
   return response.text();
+}
+
+async function fetchWithRetry(url: string, attempts = 4): Promise<Response> {
+  let lastError = '';
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const retryUrl = attempt === 0 ? url : withCacheBust(url, attempt);
+    try {
+      const response = await fetch(retryUrl, { cache: attempt === 0 ? 'default' : 'reload' });
+      if (response.ok) return response;
+      lastError = `${response.status} ${response.statusText}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await delay(250 * (attempt + 1));
+  }
+  throw new Error(`Failed to fetch ${url}: ${lastError}`);
+}
+
+function withCacheBust(url: string, attempt: number): string {
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}retry=${attempt}-${Date.now()}`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function mkdirSafe(mujoco: any, path: string): void {
