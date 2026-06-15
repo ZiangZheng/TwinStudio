@@ -1,112 +1,79 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import loadMujoco from '@mujoco/mujoco';
-import wasmUrl from '@mujoco/mujoco/mujoco.wasm?url';
+import loadMujoco from 'mujoco-js/dist/mujoco_wasm.js';
 import { CameraWindow } from './cameras';
-import { DEFAULT_CONTROLLER, DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
-import { applyPDControl, setStateFromReference } from './controller';
+import { DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
 import { loadMotionFromFile, loadMotionFromURL, sampleMotion } from './motion';
-import { getBodyWorldTransform, loadMuJoCoWorld, setupMujocoVFS, updateVisualTransforms, type MuJoCoWorld } from './mujocoWorld';
-import { RealTimePlot } from './plots';
+import { getBodyWorldTransform, loadPhpFkWorld, setupPhpMujocoVFS, updateVisualTransforms, type PhpFkWorld } from './phpFkWorld';
 import { buildUI } from './ui';
-import { computeTrackingRms, EMPTY_TELEMETRY } from './telemetry';
-import type { ControlStats, ControllerOptions, MotionClip, PlaybackMode, TelemetryFrame } from './types';
+import { EMPTY_TELEMETRY } from './telemetry';
+import type { MotionClip, TelemetryFrame } from './types';
 
 export async function runApp(container: HTMLElement): Promise<void> {
   container.innerHTML = '<div id="viewport"></div>';
   const viewport = container.querySelector<HTMLDivElement>('#viewport');
   if (!viewport) throw new Error('Viewport mount failed.');
 
-  let world: MuJoCoWorld | null = null;
-  let mujoco: Awaited<ReturnType<typeof loadMujoco>> | null = null;
+  let world: PhpFkWorld | null = null;
+  let mujoco: any = null;
   let motion: MotionClip | null = null;
-  let mode: PlaybackMode = 'kinematic';
   let playing = true;
   let speed = 1;
   let currentTime = 0;
-  let simTime = 0;
-  let showGhost = true;
-  let controller: ControllerOptions = { ...DEFAULT_CONTROLLER };
   let lastFrame = performance.now();
   let smoothedFps = 0;
-  let latestControl: ControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
-  let plotAccumulator = 0;
   const stageOffset = new THREE.Vector3();
-  const cameraTarget = new THREE.Vector3(0, 0.85, 0);
+  const cameraTarget = new THREE.Vector3(0, 0.9, 0);
 
   const ui = buildUI({
     onPlayPause: () => {
       playing = !playing;
     },
-    onReset: () => {
-      resetTo(0);
-      trackingPlot.clear();
-      heightPlot.clear();
-      effortPlot.clear();
-    },
-    onModeChange: (nextMode) => {
-      mode = nextMode;
-      ui.setMode(mode);
-      if (world) world.reference.root.visible = mode === 'sim2sim' && showGhost;
-      resetTo(currentTime);
-    },
+    onReset: () => resetTo(0),
     onSpeedChange: (value) => {
       speed = value;
     },
-    onSeek: (value) => {
-      resetTo(value);
-    },
+    onSeek: (value) => resetTo(value),
     onFile: async (file) => {
       try {
         ui.setLoading(`Loading ${file.name}`);
-        const nextMotion = await loadMotionFromFile(file);
-        installMotion(nextMotion);
+        installMotion(await loadMotionFromFile(file));
         ui.setReady();
       } catch (error) {
         ui.setError(error instanceof Error ? error.message : String(error));
       }
     },
-    onControllerChange: (next) => {
-      controller = next;
-    },
-    onGhostChange: (visible) => {
-      showGhost = visible;
-      if (world) world.reference.root.visible = mode === 'sim2sim' && showGhost;
-    },
   });
   container.appendChild(ui.root);
-
-  const trackingPlot = new RealTimePlot(ui.trackingCanvas, 'Tracking RMS', ['qpos rms'], ['#55d6ff']);
-  const heightPlot = new RealTimePlot(ui.heightCanvas, 'Root Height', ['reference', 'actual'], ['#6ee7b7', '#f9a86c']);
-  const effortPlot = new RealTimePlot(ui.effortCanvas, 'Control Effort', ['mean |tau|', 'max |tau|'], ['#b78cff', '#ff5c8a']);
   ui.setTelemetry(EMPTY_TELEMETRY);
 
   ui.setLoading('Loading MuJoCo WASM');
-  mujoco = await loadMujoco({ locateFile: (path: string) => (path === 'mujoco.wasm' ? wasmUrl : path) });
-  ui.setLoading('Preparing G1 model');
-  await setupMujocoVFS(mujoco);
-  world = loadMuJoCoWorld(mujoco);
-  setInitialStandState(world, mujoco);
+  mujoco = await loadMujoco();
+  ui.setLoading('Preparing PHP FK pipeline');
+  await setupPhpMujocoVFS(mujoco);
+  world = loadPhpFkWorld(mujoco);
+  setStateFromQpos(world.model, world.data, new Float32Array(INITIAL_STAND_QPOS), new Float32Array(world.model.nv));
+  mujoco.mj_forward(world.model, world.data);
 
   const scene = createScene();
   const stageRoot = new THREE.Group();
-  stageRoot.name = 'Centered Robot Stage';
-  stageRoot.add(world.actual.root);
-  stageRoot.add(world.reference.root);
+  stageRoot.name = 'Centered FK Stage';
+  stageRoot.add(world.root);
   scene.add(stageRoot);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   viewport.appendChild(renderer.domElement);
 
-  const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.02, 120);
-  camera.position.set(2.35, 1.55, 2.35);
+  const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.02, 160);
+  camera.position.set(2.7, 1.65, 2.5);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.06;
+  controls.dampingFactor = 0.08;
   controls.target.copy(cameraTarget);
 
   const rgbWindow = new CameraWindow(ui.rgbContainer, false);
@@ -132,41 +99,18 @@ export async function runApp(container: HTMLElement): Promise<void> {
     motion = { ...nextMotion, warnings };
     ui.setMotionInfo(motion.sourceName, motion.qpos.length, motion.duration, motion.fps, warnings);
     resetTo(0);
-    trackingPlot.clear();
-    heightPlot.clear();
-    effortPlot.clear();
   }
 
   function resetTo(time: number): void {
     if (!world || !mujoco || !motion) return;
     currentTime = wrapTime(time, motion.duration);
-    simTime = currentTime;
-    latestControl = { meanAbsTorque: 0, maxAbsTorque: 0 };
     const sample = sampleMotion(motion, currentTime);
-    if (mode === 'sim2sim') {
-      setStateFromReference(world.model, world.data, buildStandQposAtReferenceRoot(sample.qpos), new Float32Array(world.model.nv));
-    } else {
-      setStateFromReference(world.model, world.data, sample.qpos, sample.qvel);
-    }
-    setStateFromReference(world.model, world.referenceData, sample.qpos, sample.qvel);
+    setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
     mujoco.mj_forward(world.model, world.data);
-    mujoco.mj_forward(world.model, world.referenceData);
-    updateVisualTransforms(world.model, world.data, world.actual.bodies);
-    updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
+    updateVisualTransforms(world.model, world.data, world.bodies);
     updateStageCenter();
-    world.reference.root.visible = mode === 'sim2sim' && showGhost;
     ui.setTime(currentTime, motion.duration);
-  }
-
-  function setInitialStandState(nextWorld: MuJoCoWorld, nextMujoco: Awaited<ReturnType<typeof loadMujoco>>): void {
-    const qpos = new Float32Array(INITIAL_STAND_QPOS);
-    const qvel = new Float32Array(nextWorld.model.nv);
-    setStateFromReference(nextWorld.model, nextWorld.data, qpos, qvel);
-    setStateFromReference(nextWorld.model, nextWorld.referenceData, qpos, qvel);
-    nextMujoco.mj_forward(nextWorld.model, nextWorld.data);
-    nextMujoco.mj_forward(nextWorld.model, nextWorld.referenceData);
-    updateVisualTransforms(nextWorld.model, nextWorld.data, nextWorld.actual.bodies);
-    updateVisualTransforms(nextWorld.model, nextWorld.referenceData, nextWorld.reference.bodies);
+    pushTelemetry();
   }
 
   function animate(now: number): void {
@@ -178,11 +122,11 @@ export async function runApp(container: HTMLElement): Promise<void> {
     const instantFps = dt > 0 ? 1 / dt : 0;
     smoothedFps = smoothedFps === 0 ? instantFps : smoothedFps * 0.92 + instantFps * 0.08;
 
-    if (motion && playing) stepMotion(dt);
+    if (motion && playing) stepFk(dt);
 
-    updateVisualTransforms(world.model, world.data, world.actual.bodies);
-    updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
+    updateVisualTransforms(world.model, world.data, world.bodies);
     updateStageCenter();
+
     const head = getBodyWorldTransform(world.data, world.headBodyId);
     head.position.add(stageOffset);
     rgbWindow.updatePose(head.position, head.quaternion);
@@ -194,61 +138,28 @@ export async function runApp(container: HTMLElement): Promise<void> {
     depthWindow.render(scene);
   }
 
-  function stepMotion(dt: number): void {
+  function stepFk(dt: number): void {
     if (!world || !mujoco || !motion) return;
-
-    if (mode === 'kinematic') {
-      currentTime = wrapTime(currentTime + dt * speed, motion.duration);
-      simTime = currentTime;
-      const sample = sampleMotion(motion, currentTime);
-      setStateFromReference(world.model, world.data, sample.qpos, sample.qvel);
-      setStateFromReference(world.model, world.referenceData, sample.qpos, sample.qvel);
-      mujoco.mj_forward(world.model, world.data);
-      mujoco.mj_forward(world.model, world.referenceData);
-      latestControl = { meanAbsTorque: 0, maxAbsTorque: 0 };
-    } else {
-      const step = world.model.opt.timestep;
-      const target = simTime + dt * speed;
-      let steps = 0;
-      while (simTime < target && steps < 80) {
-        const sample = sampleMotion(motion, simTime);
-        setStateFromReference(world.model, world.referenceData, sample.qpos, sample.qvel);
-        mujoco.mj_forward(world.model, world.referenceData);
-        latestControl = applyPDControl(mujoco, world.model, world.data, sample.qpos, sample.qvel, controller);
-        mujoco.mj_step(world.model, world.data);
-        stabilizeFloatingBase(world.model, world.data, sample.qpos, sample.qvel);
-        mujoco.mj_forward(world.model, world.data);
-        simTime += step;
-        steps++;
-      }
-      currentTime = simTime;
-      if (currentTime >= motion.duration) resetTo(0);
-    }
-
+    currentTime = wrapTime(currentTime + dt * speed, motion.duration);
+    const sample = sampleMotion(motion, currentTime);
+    setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
+    mujoco.mj_forward(world.model, world.data);
     ui.setTime(currentTime, motion.duration);
-    pushTelemetry(dt);
+    pushTelemetry();
   }
 
-  function pushTelemetry(dt: number): void {
-    if (!world || !motion) return;
-    plotAccumulator += dt;
-    const ref = sampleMotion(motion, currentTime);
+  function pushTelemetry(): void {
+    if (!world) return;
     const telemetry: TelemetryFrame = {
       time: currentTime,
       fps: smoothedFps,
-      trackingRms: computeTrackingRms(world.model, world.data.qpos, ref.qpos),
-      rootHeightRef: ref.qpos[2] ?? 0,
+      trackingRms: 0,
+      rootHeightRef: world.data.qpos[2] ?? 0,
       rootHeightActual: world.data.qpos[2] ?? 0,
-      meanTorque: latestControl.meanAbsTorque,
-      maxTorque: latestControl.maxAbsTorque,
+      meanTorque: 0,
+      maxTorque: 0,
     };
     ui.setTelemetry(telemetry);
-    if (plotAccumulator < 0.08) return;
-    plotAccumulator = 0;
-    const label = telemetry.time.toFixed(1);
-    trackingPlot.push([telemetry.trackingRms], label);
-    heightPlot.push([telemetry.rootHeightRef, telemetry.rootHeightActual], label);
-    effortPlot.push([telemetry.meanTorque, telemetry.maxTorque], label);
   }
 
   function updateStageCenter(): void {
@@ -256,29 +167,24 @@ export async function runApp(container: HTMLElement): Promise<void> {
     const pelvis = getBodyWorldTransform(world.data, world.pelvisBodyId).position;
     stageOffset.set(-pelvis.x, 0, -pelvis.z);
     stageRoot.position.copy(stageOffset);
-    cameraTarget.set(0, Math.max(0.72, Math.min(1.35, pelvis.y + 0.05)), 0);
+    cameraTarget.set(0, Math.max(0.72, Math.min(1.35, pelvis.y + 0.06)), 0);
     controls.target.lerp(cameraTarget, 0.12);
   }
 }
 
-function buildStandQposAtReferenceRoot(referenceQpos: Float32Array): Float32Array {
-  const qpos = new Float32Array(INITIAL_STAND_QPOS);
-  for (let i = 0; i < Math.min(7, referenceQpos.length); i++) qpos[i] = referenceQpos[i];
-  return qpos;
-}
-
-function stabilizeFloatingBase(model: any, data: any, qposRef: Float32Array, qvelRef: Float32Array): void {
-  for (let i = 0; i < Math.min(7, model.nq, qposRef.length); i++) data.qpos[i] = qposRef[i];
-  for (let i = 0; i < Math.min(6, model.nv, qvelRef.length); i++) data.qvel[i] = qvelRef[i];
+function setStateFromQpos(model: any, data: any, qpos: Float32Array, qvel?: Float32Array): void {
+  for (let i = 0; i < model.nq; i++) data.qpos[i] = qpos[i] ?? data.qpos[i];
+  for (let i = 0; i < model.nv; i++) data.qvel[i] = qvel?.[i] ?? 0;
+  for (let i = 0; i < model.nu; i++) data.ctrl[i] = 0;
 }
 
 function createScene(): THREE.Scene {
   const scene = new THREE.Scene();
   scene.background = makeSkyTexture();
-  scene.fog = new THREE.Fog(new THREE.Color(0x9fb5c6), 18, 80);
+  scene.fog = new THREE.Fog(new THREE.Color(0x9fb5c6), 20, 90);
 
-  scene.add(new THREE.HemisphereLight(0xbfe8ff, 0x423d35, 0.74));
-  const key = new THREE.DirectionalLight(0xfff2d4, 2.5);
+  scene.add(new THREE.HemisphereLight(0xbfe8ff, 0x423d35, 0.78));
+  const key = new THREE.DirectionalLight(0xfff2d4, 2.6);
   key.position.set(6, 9, 4);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
@@ -290,7 +196,7 @@ function createScene(): THREE.Scene {
   key.shadow.camera.bottom = -10;
   scene.add(key);
 
-  const rim = new THREE.DirectionalLight(0x63d7ff, 1.2);
+  const rim = new THREE.DirectionalLight(0x63d7ff, 1.1);
   rim.position.set(-4, 4, -5);
   scene.add(rim);
   return scene;

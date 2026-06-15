@@ -1,10 +1,10 @@
 # SonicTwin Studio
 
-Browser-native Sonic sim2sim workspace powered by MuJoCo WASM.
+Browser-native Sonic FK playback workspace powered by the `mujoco-js` WASM pipeline.
 
 ## Intent
 
-SonicTwin Studio loads a Unitree G1 MuJoCo model in the browser, plays motion references, and can run a lightweight sim2sim loop with a PD tracker. It supports bundled reference playback and user uploads in JSON or common NPZ layouts.
+SonicTwin Studio loads a Unitree G1 MuJoCo model in the browser, plays Sonic dynamic motion by writing qpos/qvel directly into MuJoCo, and renders the result through the same style of Three.js visual tree used by the PHP MuJoCo WASM demo. The page is a pure FK viewer: no reference ghost, no PD tracker, and no sim2sim control loop.
 
 ## Run
 
@@ -16,8 +16,8 @@ npm run dev
 Open the Vite URL printed in the terminal.
 
 The robot is initialized with Sonic's G1 standing root state and MuJoCo-order
-default joint angles before any reference clip is installed. Uploaded joint-only
-references inherit this root state unless they provide `root_pos/root_quat` or
+default joint angles before any motion clip is installed. Uploaded joint-only
+motions inherit this root state unless they provide `root_pos/root_quat` or
 `body_pos_w/body_quat_w`.
 
 ## Motion Uploads
@@ -41,12 +41,10 @@ When only joint positions are present, the loader builds a floating-base `qpos` 
 ```text
 public/assets/g1/   Unitree G1 MuJoCo XML and meshes
 public/motions/     Bundled reference clips
-src/app.ts          Runtime orchestration
+src/app.ts          Runtime orchestration and FK playback loop
 src/motion.ts       JSON and NPZ motion loaders
-src/mujocoWorld.ts  MuJoCo VFS, model loading, Three.js visuals
-src/controller.ts   PD tracker
+src/phpFkWorld.ts   mujoco-js VFS, model loading, Three.js visuals
 src/ui.ts           DOM controls and HUD
-src/plots.ts        Chart.js telemetry plots
 src/cameras.ts      RGB/depth first-person render windows
 ```
 

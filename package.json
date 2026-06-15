@@ -13,6 +13,7 @@
     "@types/three": "^0.184.1",
     "chart.js": "^4.5.1",
     "fflate": "^0.8.2",
+    "mujoco-js": "^0.0.7",
     "three": "^0.184.0"
   },
   "devDependencies": {
