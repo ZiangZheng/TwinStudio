@@ -183,6 +183,7 @@ function buildMaterial(model: any, geomId: number, ghost: boolean): THREE.Materi
       color: 0x4de8ff,
       transparent: true,
       opacity: 0.22,
+      depthTest: false,
       depthWrite: false,
       wireframe: true,
     });

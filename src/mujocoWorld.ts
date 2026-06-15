@@ -181,6 +181,7 @@ function buildMaterial(model: any, geomId: number, ghost = false): THREE.Materia
       color: 0x4de8ff,
       transparent: true,
       opacity: 0.22,
+      depthTest: false,
       depthWrite: false,
       wireframe: true,
     });

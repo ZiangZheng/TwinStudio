@@ -60,7 +60,7 @@ export function buildUI(events: UIEvents): UIHandle {
         </label>
         <label class="control-line compact-line">
           <span>Reference</span>
-          <input data-reference type="checkbox" checked>
+          <input data-reference type="checkbox">
         </label>
       </section>
 

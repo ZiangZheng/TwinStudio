@@ -20,7 +20,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
   let playing = true;
   let speed = 1;
   let currentTime = 0;
-  let showReference = true;
+  let showReference = false;
   let lastFrame = performance.now();
   let smoothedFps = 0;
   const stageOffset = new THREE.Vector3();
