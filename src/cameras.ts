@@ -6,6 +6,12 @@ export class CameraWindow {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly depthMaterial: THREE.ShaderMaterial;
   private readonly resizeObserver: ResizeObserver;
+  private readonly anchorOffset = new THREE.Vector3(0.24, 0.28, 0);
+  private readonly lookAtOffset = new THREE.Vector3(1.45, 0.12, 0);
+  private readonly localUp = new THREE.Vector3(0, 1, 0);
+  private readonly tmpOffset = new THREE.Vector3();
+  private readonly tmpTarget = new THREE.Vector3();
+  private readonly tmpUp = new THREE.Vector3();
 
   constructor(container: HTMLElement, private readonly isDepth: boolean) {
     this.container = container;
@@ -15,7 +21,7 @@ export class CameraWindow {
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-    this.camera = new THREE.PerspectiveCamera(58, 1, 0.04, 18);
+    this.camera = new THREE.PerspectiveCamera(58, 1, 0.06, 18);
     this.depthMaterial = new THREE.ShaderMaterial({
       uniforms: {
         near: { value: this.camera.near },
@@ -46,11 +52,14 @@ export class CameraWindow {
     this.resize();
   }
 
-  updatePose(headPos: THREE.Vector3, headQuat: THREE.Quaternion): void {
-    const offset = new THREE.Vector3(0.09, 0, 0.02).applyQuaternion(headQuat);
-    this.camera.position.copy(headPos).add(offset);
-    this.camera.quaternion.copy(headQuat);
-    this.camera.rotateX(-0.08);
+  updatePose(anchorPos: THREE.Vector3, anchorQuat: THREE.Quaternion): void {
+    this.tmpOffset.copy(this.anchorOffset).applyQuaternion(anchorQuat);
+    this.camera.position.copy(anchorPos).add(this.tmpOffset);
+
+    this.tmpTarget.copy(this.lookAtOffset).applyQuaternion(anchorQuat).add(anchorPos);
+    this.tmpUp.copy(this.localUp).applyQuaternion(anchorQuat).normalize();
+    this.camera.up.copy(this.tmpUp);
+    this.camera.lookAt(this.tmpTarget);
   }
 
   render(scene: THREE.Scene): void {

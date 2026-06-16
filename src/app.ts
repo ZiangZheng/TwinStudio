@@ -5,6 +5,7 @@ import { CameraWindow } from './cameras';
 import { DEFAULT_CONTROLLER, DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
 import { applyPDControl } from './controller';
 import { loadMotionFromFile, loadMotionFromURL, sampleMotion } from './motion';
+import { PolicyController } from './policyController.js';
 import { getBodyWorldTransform, loadPhpFkWorld, setupPhpMujocoVFS, updateVisualTransforms, type PhpFkWorld } from './phpFkWorld';
 import { buildUI } from './ui';
 import { computeTrackingRms, EMPTY_TELEMETRY } from './telemetry';
@@ -27,8 +28,9 @@ export async function runApp(container: HTMLElement): Promise<void> {
   let smoothedFps = 0;
   let controllerOptions: ControllerOptions = { ...DEFAULT_CONTROLLER };
   let lastControlStats: ControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
-  const stageOffset = new THREE.Vector3();
-  const cameraTarget = new THREE.Vector3(0, 0.9, 0);
+  let policyController: PolicyController | null = null;
+  let policyStepCounter = 0;
+  let policyDecimation = 1;
 
   const ui = buildUI({
     onPlayPause: () => {
@@ -37,9 +39,9 @@ export async function runApp(container: HTMLElement): Promise<void> {
     onReset: () => resetTo(0),
     onModeChange: (mode) => {
       playbackMode = mode;
-      showReference = mode === 'sim2sim';
+      showReference = false;
       ui.setReferenceVisible(showReference);
-      resetTo(currentTime);
+      resetTo(mode === 'sim2sim' ? 0 : currentTime);
     },
     onSpeedChange: (value) => {
       speed = value;
@@ -80,10 +82,11 @@ export async function runApp(container: HTMLElement): Promise<void> {
   world = loadPhpFkWorld(mujoco);
   setStateFromQpos(world.model, world.data, new Float32Array(INITIAL_STAND_QPOS), new Float32Array(world.model.nv));
   mujoco.mj_forward(world.model, world.data);
+  await initPolicy();
 
   const scene = createScene();
   const stageRoot = new THREE.Group();
-  stageRoot.name = 'Centered FK Stage';
+  stageRoot.name = 'FK Stage';
   stageRoot.add(world.actual.root);
   stageRoot.add(world.reference.root);
   scene.add(stageRoot);
@@ -101,7 +104,11 @@ export async function runApp(container: HTMLElement): Promise<void> {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.target.copy(cameraTarget);
+  controls.enablePan = true;
+  controls.screenSpacePanning = true;
+  controls.panSpeed = 1.2;
+  controls.target.set(0, 0.9, 0);
+  controls.update();
 
   const rgbWindow = new CameraWindow(ui.rgbContainer, false);
   const depthWindow = new CameraWindow(ui.depthContainer, true);
@@ -135,6 +142,10 @@ export async function runApp(container: HTMLElement): Promise<void> {
     if (!world || !mujoco || !motion) return;
     currentTime = wrapTime(time, motion.duration);
     lastControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
+    if (playbackMode === 'sim2sim') {
+      resetPolicyState();
+      return;
+    }
     const sample = sampleMotion(motion, currentTime);
     setStateFromQpos(world.model, world.data, sample.qpos, sample.qvel);
     setReferenceFromSample(sample);
@@ -143,7 +154,6 @@ export async function runApp(container: HTMLElement): Promise<void> {
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
     updateReferenceVisibility();
-    updateStageCenter();
     ui.setTime(currentTime, motion.duration);
     pushTelemetry();
   }
@@ -161,10 +171,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
 
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     updateVisualTransforms(world.model, world.referenceData, world.reference.bodies);
-    updateStageCenter();
 
     const head = getBodyWorldTransform(world.data, world.headBodyId);
-    head.position.add(stageOffset);
     rgbWindow.updatePose(head.position, head.quaternion);
     depthWindow.updatePose(head.position, head.quaternion);
 
@@ -200,11 +208,22 @@ export async function runApp(container: HTMLElement): Promise<void> {
 
     while (currentTime < targetTime && steps < 80) {
       if (currentTime >= motion.duration) {
-        resetTo(0);
+        resetPolicyState();
         return;
       }
-      const sample = sampleMotion(motion, currentTime);
-      stats = applyPDControl(mujoco, world.model, world.data, sample.qpos, sample.qvel, controllerOptions);
+      if (policyController?.isReady) {
+        if (policyStepCounter % policyDecimation === 0) {
+          void policyController.requestAction(world.model, world.data).catch((error) => {
+            console.error('Policy inference error:', error);
+          });
+        }
+        policyController.applyControl(world.model, world.data);
+        stats = readControlStats(world.model, world.data);
+        policyStepCounter++;
+      } else {
+        const sample = sampleMotion(motion, currentTime);
+        stats = applyPDControl(mujoco, world.model, world.data, sample.qpos, sample.qvel, controllerOptions);
+      }
       mujoco.mj_step(world.model, world.data);
       currentTime += step;
       steps++;
@@ -212,9 +231,11 @@ export async function runApp(container: HTMLElement): Promise<void> {
 
     currentTime = wrapTime(currentTime, motion.duration);
     lastControlStats = stats;
-    const sample = sampleMotion(motion, currentTime);
-    setReferenceFromSample(sample);
-    mujoco.mj_forward(world.model, world.referenceData);
+    if (!policyController?.isReady) {
+      const sample = sampleMotion(motion, currentTime);
+      setReferenceFromSample(sample);
+      mujoco.mj_forward(world.model, world.referenceData);
+    }
     ui.setTime(currentTime, motion.duration);
     pushTelemetry();
   }
@@ -225,22 +246,17 @@ export async function runApp(container: HTMLElement): Promise<void> {
     const telemetry: TelemetryFrame = {
       time: currentTime,
       fps: smoothedFps,
-      trackingRms: sample.referenceQpos ? computeTrackingRms(world.model, world.data.qpos, sample.referenceQpos) : 0,
-      rootHeightRef: sample.referenceQpos?.[2] ?? world.data.qpos[2] ?? 0,
+      trackingRms: playbackMode === 'sim2sim' && policyController?.isReady
+        ? 0
+        : sample.referenceQpos ? computeTrackingRms(world.model, world.data.qpos, sample.referenceQpos) : 0,
+      rootHeightRef: playbackMode === 'sim2sim' && policyController?.isReady
+        ? world.data.qpos[2] ?? 0
+        : sample.referenceQpos?.[2] ?? world.data.qpos[2] ?? 0,
       rootHeightActual: world.data.qpos[2] ?? 0,
       meanTorque: playbackMode === 'sim2sim' ? lastControlStats.meanAbsTorque : 0,
       maxTorque: playbackMode === 'sim2sim' ? lastControlStats.maxAbsTorque : 0,
     };
     ui.setTelemetry(telemetry);
-  }
-
-  function updateStageCenter(): void {
-    if (!world) return;
-    const pelvis = getBodyWorldTransform(world.data, world.pelvisBodyId).position;
-    stageOffset.set(-pelvis.x, 0, -pelvis.z);
-    stageRoot.position.copy(stageOffset);
-    cameraTarget.set(0, Math.max(0.72, Math.min(1.35, pelvis.y + 0.06)), 0);
-    controls.target.lerp(cameraTarget, 0.12);
   }
 
   function setReferenceFromSample(sample: ReturnType<typeof sampleMotion>): void {
@@ -253,6 +269,39 @@ export async function runApp(container: HTMLElement): Promise<void> {
   function updateReferenceVisibility(): void {
     if (!world || !motion) return;
     world.reference.root.visible = showReference && !!motion.referenceQpos;
+  }
+
+  async function initPolicy(): Promise<void> {
+    if (!world || !mujoco) return;
+    const params = new URLSearchParams(window.location.search);
+    const modelPath = params.get('policy') || './php-wasm/2026-01-17_09-51-30_student-new-loco-old-skill_student.onnx';
+    const controller = new PolicyController(mujoco, {
+      modelPath,
+      depthModelPath: params.get('depthPolicy') || null,
+      controlDt: 0.02,
+    });
+    try {
+      ui.setLoading('Loading ONNX policy');
+      await controller.init(world.model);
+      policyController = controller;
+      policyDecimation = Math.max(1, Math.round(controller.controlDt / (world.model.opt.timestep || 0.002)));
+    } catch (error) {
+      console.error('Failed to initialize ONNX policy:', error);
+      policyController = null;
+    }
+  }
+
+  function resetPolicyState(): void {
+    if (!world || !mujoco || !motion) return;
+    currentTime = 0;
+    policyStepCounter = 0;
+    lastControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
+    policyController?.reset();
+    setStateFromQpos(world.model, world.data, new Float32Array(INITIAL_STAND_QPOS), new Float32Array(world.model.nv));
+    mujoco.mj_forward(world.model, world.data);
+    updateVisualTransforms(world.model, world.data, world.actual.bodies);
+    ui.setTime(currentTime, motion.duration);
+    pushTelemetry();
   }
 }
 
@@ -307,6 +356,20 @@ function makeSkyTexture(): THREE.CanvasTexture {
 function wrapTime(time: number, duration: number): number {
   if (duration <= 0) return 0;
   return ((time % duration) + duration) % duration;
+}
+
+function readControlStats(model: any, data: any): ControlStats {
+  let sum = 0;
+  let max = 0;
+  for (let i = 0; i < model.nu; i++) {
+    const abs = Math.abs(data.ctrl[i] ?? 0);
+    sum += abs;
+    max = Math.max(max, abs);
+  }
+  return {
+    meanAbsTorque: model.nu > 0 ? sum / model.nu : 0,
+    maxAbsTorque: max,
+  };
 }
 
 function readInitialPlaybackMode(): PlaybackMode {

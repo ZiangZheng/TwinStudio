@@ -54,7 +54,8 @@ export function loadPhpFkWorld(mujoco: any): PhpFkWorld {
   updateVisualTransforms(model, referenceData, reference.bodies);
 
   const pelvisBodyId = findBodyId(model, 'pelvis');
-  const headBodyId = findBodyId(model, 'head_link', pelvisBodyId);
+  const torsoBodyId = findBodyId(model, 'torso_link', pelvisBodyId);
+  const headBodyId = findBodyId(model, 'head_link', torsoBodyId);
 
   return { model, data, referenceData, actual, reference, headBodyId, pelvisBodyId };
 }
