@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import loadMujoco from 'mujoco-js/dist/mujoco_wasm.js';
 import { CameraWindow } from './cameras';
-import { DEFAULT_CONTROLLER, DEFAULT_MOTION_URL, INITIAL_STAND_QPOS } from './constants';
+import { DEFAULT_CONTROLLER, DEFAULT_MOTION_URL, INITIAL_STAND_QPOS, POLICY_RESET_QPOS } from './constants';
 import { applyPDControl } from './controller';
 import { loadMotionFromFile, loadMotionFromURL, sampleMotion } from './motion';
 import { PolicyController } from './policyController.js';
@@ -318,10 +318,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
     policyActionNeeded = true;
     lastControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
     policyController?.reset();
-    const qpos = policyController?.isReady
-      ? policyController.getDefaultQpos(world.model, Array.from(INITIAL_STAND_QPOS.slice(0, 7)))
-      : new Float32Array(INITIAL_STAND_QPOS);
-    setStateFromQpos(world.model, world.data, qpos, new Float32Array(world.model.nv));
+    setStateFromQpos(world.model, world.data, new Float32Array(POLICY_RESET_QPOS), new Float32Array(world.model.nv));
     mujoco.mj_forward(world.model, world.data);
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     ui.setTime(currentTime, motion.duration);
