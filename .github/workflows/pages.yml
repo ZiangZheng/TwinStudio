@@ -17,16 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --include=dev
-      - run: npm run build
-      - name: Publish dist to gh-pages
+      - name: Publish site to gh-pages
         run: |
           set -eux
-          cp -R dist /tmp/twinstudio-pages
+          cp -R site /tmp/twinstudio-pages
           touch /tmp/twinstudio-pages/.nojekyll
           cd /tmp/twinstudio-pages
           git init -b gh-pages
