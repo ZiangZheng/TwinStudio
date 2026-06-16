@@ -31,6 +31,8 @@ export async function runApp(container: HTMLElement): Promise<void> {
   let policyController: PolicyController | null = null;
   let policyStepCounter = 0;
   let policyDecimation = 1;
+  let policyActionPromise: Promise<void> | null = null;
+  let policyActionNeeded = true;
 
   const ui = buildUI({
     onPlayPause: () => {
@@ -213,13 +215,24 @@ export async function runApp(container: HTMLElement): Promise<void> {
       }
       if (policyController?.isReady) {
         if (policyStepCounter % policyDecimation === 0) {
-          void policyController.requestAction(world.model, world.data).catch((error) => {
-            console.error('Policy inference error:', error);
-          });
+          if (policyActionNeeded && !policyActionPromise) {
+            policyActionPromise = policyController.requestAction(world.model, world.data)
+              .catch((error) => {
+                console.error('Policy inference error:', error);
+              })
+              .finally(() => {
+                policyActionPromise = null;
+                policyActionNeeded = false;
+              });
+          }
+          if (policyActionPromise || policyActionNeeded) return;
         }
         policyController.applyControl(world.model, world.data);
         stats = readControlStats(world.model, world.data);
         policyStepCounter++;
+        if (policyStepCounter % policyDecimation === 0) {
+          policyActionNeeded = true;
+        }
       } else {
         const sample = sampleMotion(motion, currentTime);
         stats = applyPDControl(mujoco, world.model, world.data, sample.qpos, sample.qvel, controllerOptions);
@@ -295,9 +308,14 @@ export async function runApp(container: HTMLElement): Promise<void> {
     if (!world || !mujoco || !motion) return;
     currentTime = 0;
     policyStepCounter = 0;
+    policyActionPromise = null;
+    policyActionNeeded = true;
     lastControlStats = { meanAbsTorque: 0, maxAbsTorque: 0 };
     policyController?.reset();
-    setStateFromQpos(world.model, world.data, new Float32Array(INITIAL_STAND_QPOS), new Float32Array(world.model.nv));
+    const qpos = policyController?.isReady
+      ? policyController.getDefaultQpos(world.model, Array.from(INITIAL_STAND_QPOS.slice(0, 7)))
+      : new Float32Array(INITIAL_STAND_QPOS);
+    setStateFromQpos(world.model, world.data, qpos, new Float32Array(world.model.nv));
     mujoco.mj_forward(world.model, world.data);
     updateVisualTransforms(world.model, world.data, world.actual.bodies);
     ui.setTime(currentTime, motion.duration);

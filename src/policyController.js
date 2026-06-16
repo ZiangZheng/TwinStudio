@@ -348,6 +348,20 @@ export class PolicyController {
     this.depthLatentQueue = [];
   }
 
+  getDefaultQpos(model, rootQpos = [0, 0, 0.8, 1, 0, 0, 0]) {
+    const qpos = new Float32Array(model.nq);
+    for (let i = 0; i < Math.min(rootQpos.length, qpos.length); i++) {
+      qpos[i] = rootQpos[i];
+    }
+    for (let i = 0; i < this.jointInfo.length; i++) {
+      const info = this.jointInfo[i];
+      if (Number.isInteger(info.qposAdr)) {
+        qpos[info.qposAdr] = this.defaultJointPos[i] ?? 0.0;
+      }
+    }
+    return qpos;
+  }
+
   _updateCommandState() {
     const arr = new Float32Array(15);
 

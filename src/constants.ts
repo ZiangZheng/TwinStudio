@@ -2,7 +2,7 @@ import type { ControllerOptions } from './types';
 
 export const APP_NAME = 'SonicTwin Studio';
 export const MUJOCO_SCENE_PATH = '/workspace/scene.xml';
-export const DEFAULT_XML_URL = './assets/g1/scene.xml';
+export const DEFAULT_XML_URL = './assets/scenes/g1_with_terrain.xml';
 export const DEFAULT_ROBOT_XML_URL = './assets/g1/g1_29dof_rev_1_0.xml';
 export const DEFAULT_MOTION_URL = './motions/squat_001.json?v=e94d5b8';
 

@@ -30,10 +30,10 @@ export async function setupPhpMujocoVFS(mujoco: any): Promise<void> {
   robotText = robotText.replace(/meshdir="\.\.\/meshes\/g1\/"/g, 'meshdir="meshes/g1/"');
   mujoco.FS.writeFile('/workspace/g1_29dof_rev_1_0.xml', robotText);
 
-  const meshFiles = getMeshFiles(robotText);
+  const meshFiles = new Set([...getMeshFiles(sceneText), ...getMeshFiles(robotText)]);
   await Promise.all(
-    meshFiles.map(async (file) => {
-      const response = await fetchWithRetry(`./assets/g1/meshes/g1/${file}`);
+    Array.from(meshFiles).map(async (file) => {
+      const response = await fetchMesh(file);
       mujoco.FS.writeFile(`/workspace/meshes/g1/${file}`, new Uint8Array(await response.arrayBuffer()));
     }),
   );
@@ -255,6 +255,16 @@ function getMeshFiles(robotXml: string): string[] {
 async function fetchText(url: string): Promise<string> {
   const response = await fetchWithRetry(url);
   return response.text();
+}
+
+async function fetchMesh(file: string): Promise<Response> {
+  const primary = `./assets/g1/meshes/g1/${file}`;
+  try {
+    return await fetchWithRetry(primary, 2);
+  } catch (error) {
+    const fallback = `./assets/scenes/meshes/g1/${file}`;
+    return fetchWithRetry(fallback, 2);
+  }
 }
 
 async function fetchWithRetry(url: string, attempts = 4): Promise<Response> {
