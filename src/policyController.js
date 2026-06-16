@@ -850,7 +850,7 @@ export class PolicyController {
   }
 
   async _runDepthBackbone() {
-    if (!this.depthSession) {
+    if (!this.depthSession || !this.latestDepth) {
       return null;
     }
     const depthInput = this._prepareDepthInput();

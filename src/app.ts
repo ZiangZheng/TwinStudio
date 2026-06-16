@@ -182,6 +182,12 @@ export async function runApp(container: HTMLElement): Promise<void> {
     renderer.render(scene, camera);
     rgbWindow.render(scene);
     depthWindow.render(scene);
+    if (policyController?.isReady) {
+      const depthFrame = depthWindow.captureDepthFrame(scene);
+      if (depthFrame) {
+        policyController.setDepthImage(depthFrame.data, depthFrame.width, depthFrame.height);
+      }
+    }
   }
 
   function stepPlayback(dt: number): void {
@@ -290,7 +296,7 @@ export async function runApp(container: HTMLElement): Promise<void> {
     const modelPath = params.get('policy') || './php-wasm/2026-01-17_09-51-30_student-new-loco-old-skill_student.onnx';
     const controller = new PolicyController(mujoco, {
       modelPath,
-      depthModelPath: params.get('depthPolicy') || null,
+      depthModelPath: params.get('depthPolicy') || modelPath.replace('_student.onnx', '_depth_backbone.onnx'),
       controlDt: 0.02,
     });
     try {
